@@ -1,0 +1,40 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowReceiveDeleteFromRenderQueue",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:398890125432:bpNET-timelapse-render-jobs"
+    },
+    {
+      "Sid": "AllowReadWriteRenderBucketPaths",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:AbortMultipartUpload"
+      ],
+      "Resource": "arn:aws:s3:::amzn-s3-bigpicture-bucket/bigpicture360.net/*"
+    },
+    {
+      "Sid": "AllowListBucketForWorkerPrefixes",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::amzn-s3-bigpicture-bucket",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "bigpicture360.net/*"
+          ]
+        }
+      }
+    }
+  ]
+}

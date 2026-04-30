@@ -1,0 +1,18 @@
+services:
+  render-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.render-worker
+    env_file:
+      - .env
+    environment:
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      POLL_INTERVAL: ${POLL_INTERVAL:-5}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-2}
+      VISIBILITY_TIMEOUT: ${VISIBILITY_TIMEOUT:-3600}
+      MIN_FREE_DISK_GB: ${MIN_FREE_DISK_GB:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FFMPEG_MIN_TIMEOUT_SECONDS: "1800"
+      FFMPEG_MAX_TIMEOUT_SECONDS: "43200"
+      FFMPEG_VISIBILITY_BUFFER_SECONDS: "900"
+    restart: unless-stopped
