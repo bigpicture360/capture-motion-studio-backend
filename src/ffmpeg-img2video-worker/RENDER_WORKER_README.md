@@ -19,7 +19,8 @@ Use an **EC2 IAM Role**, not static AWS keys.
 
 ### Environment variables you still need
 - `AWS_DEFAULT_REGION`
-- `SQS_QUEUE_URL`
+- `SQS_QUEUE_URL` for image-to-video render jobs
+- `VIDEO_BRANDING_SQS_QUEUE_URL` for `kind: "video_branding"` jobs
 - `S3_BUCKET`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
@@ -33,9 +34,30 @@ Boto3 will automatically fetch credentials from the EC2 Instance Metadata Servic
 
 ## Deployment files
 - `render_worker.py`
+- `video_branding_worker.py`
 - `Dockerfile.render-worker`
 - `docker-compose.render-worker.yml`
 - `setup-render-worker.sh`
+
+## Video-branding worker
+
+Video branding is handled by a separate `video-branding-worker` compose
+service. Use a dedicated SQS queue for this service. Do not send
+`kind: "video_branding"` messages to the normal render queue, because standard
+SQS queues cannot route messages by kind and either worker may receive the
+other worker's job first.
+
+Frontend edge-function requirement:
+- `enqueue-render` continues to send render jobs to `SQS_QUEUE_URL`.
+- `enqueue-video-branding` must send video-branding jobs to
+  `VIDEO_BRANDING_SQS_QUEUE_URL`.
+- Every enabled video-branding slot must include a pre-rendered PNG
+  `asset_key`; the video-branding worker fails fast when an enabled slot is
+  missing its source asset.
+
+Callback status values for video branding are `processing`, `complete`, and
+`failed`. Final completion includes `kind: "video_branding"`, `bucket`, `key`,
+`output_url`, and `output_duration_seconds`.
 
 ## Quick deploy
 ```bash

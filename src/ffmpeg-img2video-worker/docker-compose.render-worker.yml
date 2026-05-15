@@ -16,3 +16,22 @@ services:
       FFMPEG_MAX_TIMEOUT_SECONDS: "43200"
       FFMPEG_VISIBILITY_BUFFER_SECONDS: "900"
     restart: unless-stopped
+
+  video-branding-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.render-worker
+    command: ["python", "video_branding_worker.py"]
+    env_file:
+      - .env
+    environment:
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      VIDEO_BRANDING_SQS_QUEUE_URL: ${VIDEO_BRANDING_SQS_QUEUE_URL}
+      POLL_INTERVAL: ${POLL_INTERVAL:-5}
+      VIDEO_BRANDING_MAX_CONCURRENT: ${VIDEO_BRANDING_MAX_CONCURRENT:-1}
+      VIDEO_BRANDING_VISIBILITY_TIMEOUT: ${VIDEO_BRANDING_VISIBILITY_TIMEOUT:-3600}
+      MIN_FREE_DISK_GB: ${MIN_FREE_DISK_GB:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      VIDEO_BRANDING_FFMPEG_TIMEOUT_SECONDS: "7200"
+      FFMPEG_VISIBILITY_BUFFER_SECONDS: "900"
+    restart: unless-stopped

@@ -139,116 +139,6 @@ class AudioTrackSpec:
     fade_out: float
     loop: bool
 
-
-def clamp_number(value: Any, default: float, minimum: float, maximum: float) -> float:
-    number = safe_float(value, default)
-    return max(minimum, min(maximum, number))
-
-
-def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    number = safe_int(value, default)
-    return max(minimum, min(maximum, number))
-
-
-def normalize_watermark_spec(settings: dict[str, Any], surface: str = "video") -> Optional[dict[str, Any]]:
-    watermark = settings.get("watermark") if isinstance(settings.get("watermark"), dict) else {}
-    spec = watermark.get("spec") if isinstance(watermark.get("spec"), dict) else None
-    if spec is None and isinstance(settings.get("watermark_spec"), dict):
-        spec = settings.get("watermark_spec")
-    if spec is None and isinstance(settings.get("watermarkSpec"), dict):
-        spec = settings.get("watermarkSpec")
-    if spec is None and isinstance(settings.get("watermark.spec"), dict):
-        spec = settings.get("watermark.spec")
-
-    if not isinstance(spec, dict):
-        return None
-    if not truthy_setting(spec.get("enabled")):
-        return None
-
-    surfaces = spec.get("surfaces")
-    if isinstance(surfaces, str):
-        surfaces = [surfaces]
-    if not isinstance(surfaces, list):
-        surfaces = []
-    normalized_surfaces = [str(item).strip().lower() for item in surfaces if str(item).strip()]
-    requested_surface = str(surface or "video").strip().lower()
-    if requested_surface and requested_surface not in normalized_surfaces:
-        return None
-
-    style = spec.get("style")
-    if not isinstance(style, dict):
-        return None
-
-    mode = str(style.get("mode") or "text").strip().lower()
-    if mode not in {"text", "logo", "combo"}:
-        return None
-
-    text_style = style.get("text") if isinstance(style.get("text"), dict) else {}
-    logo_style = style.get("logo") if isinstance(style.get("logo"), dict) else {}
-    text_value = str(text_style.get("value") or "").strip()
-    logo_url = str(logo_style.get("url") or "").strip()
-    if mode == "text" and not text_value:
-        return None
-    if mode == "logo" and not logo_url:
-        return None
-    if mode == "combo" and not (text_value or logo_url):
-        return None
-
-    normalized = dict(spec)
-    normalized["surfaces"] = normalized_surfaces
-    normalized["style"] = dict(style)
-    normalized["style"]["mode"] = mode
-    return normalized
-
-
-def watermark_caps(settings: dict[str, Any]) -> dict[str, Any]:
-    spec = normalize_watermark_spec(settings)
-    if not spec:
-        return {}
-    caps = spec.get("caps") if isinstance(spec.get("caps"), dict) else {}
-    return caps
-
-
-def apply_watermark_output_caps(settings: dict[str, Any], width: int, height: int) -> tuple[int, int]:
-    width = max(2, int(width or 2))
-    height = max(2, int(height or 2))
-    caps = watermark_caps(settings)
-    if not caps:
-        return width - (width % 2), height - (height % 2)
-
-    max_width = safe_int(caps.get("max_width") or caps.get("maxWidth"), 0)
-    max_height = safe_int(caps.get("max_height") or caps.get("maxHeight"), 0)
-    scale = 1.0
-    if max_width > 0 and width > max_width:
-        scale = min(scale, max_width / width)
-    if max_height > 0 and height > max_height:
-        scale = min(scale, max_height / height)
-
-    if scale < 1.0:
-        capped_width = max(2, int(math.floor(width * scale)))
-        capped_height = max(2, int(math.floor(height * scale)))
-    else:
-        capped_width = width
-        capped_height = height
-
-    capped_width -= capped_width % 2
-    capped_height -= capped_height % 2
-    capped_width = max(2, capped_width)
-    capped_height = max(2, capped_height)
-    if (capped_width, capped_height) != (width - (width % 2), height - (height % 2)):
-        log_event(
-            "watermark_caps_scaled_output",
-            requested_width=width,
-            requested_height=height,
-            capped_width=capped_width,
-            capped_height=capped_height,
-            max_width=max_width,
-            max_height=max_height,
-            scale=round(scale, 6),
-        )
-    return capped_width, capped_height
-
-
 def normalize_transition_style(settings: dict[str, Any]) -> str:
     if truthy_setting(os.getenv("DISABLE_XFADE_TRANSITIONS", "true")):
         return "none"
@@ -319,16 +209,6 @@ class ProgressReporter:
             payload["error"] = error
         if extra:
             payload.update(extra)
-        if image_index is None and status == "processing" and stage not in {"starting"}:
-            payload.setdefault("logs", []).append({
-                "level": "info",
-                "message": message or "Render progress",
-                "details": {
-                    "stage": stage,
-                    "status": status,
-                    "progress_percent": payload["progress_percent"],
-                },
-            })
 
         payload_key = json.dumps(payload, sort_keys=True, default=str)
         should_emit = force or (
@@ -379,8 +259,6 @@ class ProgressReporter:
             return int(30 + image_fraction * 20)
         if stage in ("encoding", "ffmpeg_encoding"):
             return int(50 + image_fraction * 45)
-        if stage in ("watermarking", "watermark_post_assembly"):
-            return 92
         if stage in ("uploading", "finalizing"):
             return 96
         if stage in ("complete", "succeeded"):
@@ -543,18 +421,6 @@ def extract_job(data: dict[str, Any]) -> RenderJob:
     settings = data.get("settings") or data.get("renderSettings") or {}
     if not isinstance(settings, dict):
         settings = {}
-    else:
-        settings = dict(settings)
-
-    # Some enqueue paths send render-wide metadata at the job root instead of
-    # inside renderSettings. Prefer an enabled job-root watermark over any stale
-    # renderSettings watermark so policy-enforced watermarks cannot be shadowed.
-    root_watermark = data.get("watermark") if isinstance(data.get("watermark"), dict) else None
-    if root_watermark and (truthy_setting(root_watermark.get("enabled")) or isinstance(root_watermark.get("spec"), dict)):
-        settings["watermark"] = root_watermark
-    for root_key in ("watermark_spec", "watermarkSpec"):
-        if root_key in data:
-            settings[root_key] = data[root_key]
 
     payload_keys = sorted(data.keys()) if isinstance(data, dict) else []
     logger.info(
@@ -567,10 +433,6 @@ def extract_job(data: dict[str, Any]) -> RenderJob:
             "has_image_urls": isinstance(data.get("image_urls"), list) and len(data.get("image_urls", [])) > 0,
             "has_files": isinstance(data.get("files"), list) and len(data.get("files", [])) > 0,
             "has_input_images": isinstance(data.get("input_images"), list) and len(data.get("input_images", [])) > 0,
-            "has_root_watermark": isinstance(data.get("watermark"), dict),
-            "has_settings_watermark": isinstance(settings.get("watermark"), dict),
-            "settings_watermark_enabled": truthy_setting(settings.get("watermark", {}).get("enabled")) if isinstance(settings.get("watermark"), dict) else False,
-            "settings_watermark_has_spec": isinstance(settings.get("watermark", {}).get("spec"), dict) if isinstance(settings.get("watermark"), dict) else False,
         })
     )
 
@@ -714,87 +576,8 @@ def image_cache_identity(image_ref: Any) -> dict[str, Any]:
     }
 
 
-def explicit_image_cache_key(image_ref: Any, manifest_entry: Optional[dict[str, Any]] = None) -> Optional[str]:
-    values: list[Any] = []
-    if isinstance(image_ref, dict):
-        for key in (
-            "cache_key",
-            "cacheKey",
-            "imageContentCacheKey",
-            "image_content_cache_key",
-            "content_cache_key",
-            "contentCacheKey",
-        ):
-            values.append(image_ref.get(key))
-    if isinstance(manifest_entry, dict):
-        for key in ("cache_key", "cacheKey", "imageContentCacheKey", "image_content_cache_key"):
-            values.append(manifest_entry.get(key))
-    for value in values:
-        text = str(value or "").strip()
-        if not text:
-            continue
-        if re.fullmatch(r"[A-Za-z0-9._-]{8,200}", text):
-            return text
-        return stable_json_hash(text)
-    return None
-
-
-def image_cache_key(image_ref: Any, manifest_entry: Optional[dict[str, Any]] = None) -> str:
-    return explicit_image_cache_key(image_ref, manifest_entry) or stable_json_hash(image_cache_identity(image_ref))
-
-
-def job_flag(job: RenderJob, *names: str) -> bool:
-    for name in names:
-        if name in job.raw:
-            return truthy_setting(job.raw.get(name))
-        if name in job.settings:
-            return truthy_setting(job.settings.get(name))
-    return False
-
-
-def job_cache_metadata(job: RenderJob) -> tuple[str, str, Any]:
-    fingerprint = (
-        job.raw.get("image_cache_fingerprint")
-        or job.raw.get("imageCacheFingerprint")
-        or job.settings.get("image_cache_fingerprint")
-        or job.settings.get("imageCacheFingerprint")
-        or ""
-    )
-    changed_at = (
-        job.raw.get("image_cache_changed_at")
-        or job.raw.get("imageCacheChangedAt")
-        or job.settings.get("image_cache_changed_at")
-        or job.settings.get("imageCacheChangedAt")
-        or ""
-    )
-    manifest = (
-        job.raw.get("image_cache_manifest")
-        or job.raw.get("imageCacheManifest")
-        or job.settings.get("image_cache_manifest")
-        or job.settings.get("imageCacheManifest")
-    )
-    return str(fingerprint or ""), str(changed_at or ""), manifest
-
-
-def manifest_entry_for_image(manifest: Any, index: int, image_ref: Any) -> Optional[dict[str, Any]]:
-    if isinstance(manifest, list) and 0 <= index - 1 < len(manifest) and isinstance(manifest[index - 1], dict):
-        return manifest[index - 1]
-    if isinstance(manifest, dict):
-        candidates: list[Any] = [str(index), str(index - 1)]
-        if isinstance(image_ref, dict):
-            candidates.extend([
-                image_ref.get("id"),
-                image_ref.get("image_id"),
-                image_ref.get("imageId"),
-                image_ref.get("cache_key"),
-                image_ref.get("cacheKey"),
-                image_ref.get("imageContentCacheKey"),
-            ])
-        for candidate in candidates:
-            key = str(candidate or "").strip()
-            if key and isinstance(manifest.get(key), dict):
-                return manifest.get(key)
-    return None
+def image_cache_key(image_ref: Any) -> str:
+    return stable_json_hash(image_cache_identity(image_ref))
 
 
 def ensure_worker_storage() -> None:
@@ -846,7 +629,11 @@ def preprocess_target_size(settings: dict[str, Any]) -> tuple[int, int, str]:
 
 def processed_cache_path(cache_key: str, settings: dict[str, Any]) -> Path:
     preprocess_width, preprocess_height, preprocess_mode = preprocess_target_size(settings)
-    preprocess_kind = "scale-increase-crop-setsar-q2-lanczos-cover-v3"
+    preprocess_kind = (
+        "scale-increase-crop-setsar-q2-lanczos"
+        if str(preprocess_mode).startswith("motion-")
+        else "scale-decrease-pad-setsar-q2-lanczos"
+    )
     processed_identity = {
         "schema": CACHE_SCHEMA_VERSION,
         "source_cache_key": cache_key,
@@ -859,20 +646,9 @@ def processed_cache_path(cache_key: str, settings: dict[str, Any]) -> Path:
     return RENDER_CACHE_DIR / "processed" / f"{processed_key}.jpg"
 
 
-def write_cache_metadata(
-    meta_path: Path,
-    identity: dict[str, Any],
-    cached_file: Path,
-    *,
-    cache_key: str = "",
-    image_cache_fingerprint: str = "",
-    image_cache_changed_at: str = "",
-) -> None:
+def write_cache_metadata(meta_path: Path, identity: dict[str, Any], cached_file: Path) -> None:
     payload = {
         "identity": identity,
-        "cache_key": cache_key,
-        "image_cache_fingerprint": image_cache_fingerprint,
-        "image_cache_changed_at": image_cache_changed_at,
         "cached_file": str(cached_file),
         "size_bytes": cached_file.stat().st_size if cached_file.exists() else 0,
         "created_at": int(time.time()),
@@ -890,22 +666,11 @@ def touch_cache_metadata(meta_path: Path) -> None:
         pass
 
 
-def valid_cached_image(
-    image_ref: Any,
-    cached_file: Path,
-    meta_path: Path,
-    *,
-    cache_key: str = "",
-    image_cache_fingerprint: str = "",
-) -> bool:
+def valid_cached_image(image_ref: Any, cached_file: Path, meta_path: Path) -> bool:
     if not IMAGE_CACHE_ENABLED or not cached_file.exists() or not meta_path.exists() or cached_file.stat().st_size <= 0:
         return False
     try:
         payload = json.loads(meta_path.read_text(encoding="utf-8"))
-        if image_cache_fingerprint and payload.get("image_cache_fingerprint") not in {None, "", image_cache_fingerprint}:
-            return False
-        if cache_key and payload.get("cache_key") == cache_key:
-            return True
         return payload.get("identity") == image_cache_identity(image_ref)
     except Exception:
         return False
@@ -1168,211 +933,6 @@ def build_audio_mux_command(video_path: Path, output_path: Path, tracks: list[Au
     return cmd
 
 
-def upload_jpeg_to_s3(local_path: Path, bucket: str, key: str) -> str:
-    s3.upload_file(str(local_path), bucket, key, ExtraArgs={"ContentType": "image/jpeg"})
-    return f"s3://{bucket}/{key}"
-
-
-def frame_extraction_kind(data: dict[str, Any]) -> str:
-    return str(data.get("kind") or data.get("job_kind") or data.get("jobKind") or "").strip().lower()
-
-
-def frame_source_display_name(source: dict[str, Any]) -> str:
-    filename = str(source.get("filename") or source.get("name") or "source.mp4").strip()
-    return Path(filename).name or "source.mp4"
-
-
-def download_frame_source(source: dict[str, Any], dest: Path) -> None:
-    signed_url = str(source.get("signed_url") or source.get("signedUrl") or "").strip()
-    if signed_url:
-        try:
-            r = requests.get(signed_url, timeout=300)
-            r.raise_for_status()
-            dest.write_bytes(r.content)
-            if dest.exists() and dest.stat().st_size > 0:
-                return
-        except Exception as exc:
-            log_event("frame_source_signed_url_failed", error=str(exc)[:1000])
-
-    s3_key = str(source.get("s3_key") or source.get("s3Key") or source.get("key") or "").strip().lstrip("/")
-    bucket = str(source.get("bucket") or source.get("s3_bucket") or OUTPUT_BUCKET).strip()
-    if s3_key and bucket:
-        s3.download_file(bucket, s3_key, str(dest))
-        return
-    raise ValueError("Frame extraction source requires signed_url or s3_key with bucket/OUTPUT_BUCKET")
-
-
-def ffmpeg_jpeg_quality(value: Any) -> int:
-    quality = clamp_int(value, 85, 60, 95)
-    # Frontend quality is human-friendly 60..95. FFmpeg q:v is inverse, roughly 8..2.
-    return int(round(8 - ((quality - 60) * 6 / 35)))
-
-
-def frame_output_name(pattern: str, base: str, index: int, timestamp: float) -> str:
-    pattern = pattern or "{base}_{index:04d}.jpg"
-    safe_base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._-") or "frame"
-
-    def replace_index(match: re.Match[str]) -> str:
-        fmt = match.group(1)
-        if fmt:
-            try:
-                return ("{0:" + fmt[1:] + "}").format(index)
-            except Exception:
-                pass
-        return str(index)
-
-    name = pattern.replace("{base}", safe_base).replace("{timestamp}", f"{timestamp:.2f}")
-    name = re.sub(r"\{index(:[^}]+)?\}", replace_index, name)
-    if not Path(name).suffix:
-        name += ".jpg"
-    return Path(name).name
-
-
-def frame_timestamps(data: dict[str, Any]) -> list[float]:
-    range_spec = data.get("range") if isinstance(data.get("range"), dict) else {}
-    output = data.get("output") if isinstance(data.get("output"), dict) else {}
-    start = max(0.0, safe_float(range_spec.get("start_seconds") or range_spec.get("startSeconds"), 0.0))
-    end = safe_float(range_spec.get("end_seconds") or range_spec.get("endSeconds"), start)
-    if end < start:
-        end = start
-    frames_total = clamp_int(output.get("frames_total") or output.get("framesTotal"), 1, 1, 5000)
-    mode = str(output.get("mode") or "interval").strip().lower()
-    if mode == "count":
-        count = clamp_int(output.get("frame_count") or output.get("frameCount"), frames_total, 1, 5000)
-        frames_total = frames_total or count
-        if frames_total <= 1:
-            return [start]
-        span = max(0.0, end - start)
-        return [start + (idx * span / (frames_total - 1)) for idx in range(frames_total)]
-    interval = max(0.001, safe_float(output.get("interval_seconds") or output.get("intervalSeconds"), 1.0))
-    return [start + idx * interval for idx in range(frames_total)]
-
-
-def frame_extract_dimensions(data: dict[str, Any]) -> tuple[Optional[int], Optional[int], int, int]:
-    output = data.get("output") if isinstance(data.get("output"), dict) else {}
-    source = data.get("source") if isinstance(data.get("source"), dict) else {}
-    width = safe_int(output.get("width"), 0)
-    height = safe_int(output.get("height"), 0)
-    source_width = safe_int(source.get("width"), 1920)
-    source_height = safe_int(source.get("height"), 1080)
-    return (width if width > 0 else None, height if height > 0 else None, source_width, source_height)
-
-
-def build_frame_extract_command(video_path: Path, frame_path: Path, timestamp: float, data: dict[str, Any]) -> list[str]:
-    output = data.get("output") if isinstance(data.get("output"), dict) else {}
-    settings = {"watermark": data.get("watermark")} if isinstance(data.get("watermark"), dict) else {}
-    width, height, source_width, source_height = frame_extract_dimensions(data)
-    qv = ffmpeg_jpeg_quality(output.get("jpeg_quality") or output.get("jpegQuality"))
-    fps = 1
-    cmd = [get_ffmpeg_bin(), "-hide_banner", "-y", "-ss", f"{timestamp:.3f}", "-i", str(video_path)]
-    filters: list[str] = []
-    base_label = "0:v"
-    frame_width = width or source_width
-    frame_height = height or source_height
-    if width and height:
-        filters.append(f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,crop={width}:{height},setsar=1,format=yuv420p[framebase]")
-        base_label = "framebase"
-        frame_width, frame_height = width, height
-    elif width:
-        filters.append(f"[0:v]scale={width}:-2:flags=lanczos,setsar=1,format=yuv420p[framebase]")
-        base_label = "framebase"
-        frame_width = width
-    elif height:
-        filters.append(f"[0:v]scale=-2:{height}:flags=lanczos,setsar=1,format=yuv420p[framebase]")
-        base_label = "framebase"
-        frame_height = height
-
-    spec = normalize_watermark_spec(settings, surface="image")
-    if spec:
-        if not filters:
-            filters.append("[0:v]format=yuv420p[framebase]")
-            base_label = "framebase"
-        final_label = apply_watermark_to_label(filters, base_label, spec, frame_width, frame_height, None, fps)
-        cmd.extend(["-filter_complex", ";".join(filters), "-map", f"[{final_label}]"])
-    elif filters:
-        cmd.extend(["-filter_complex", ";".join(filters), "-map", f"[{base_label}]"])
-    else:
-        cmd.extend(["-map", "0:v:0"])
-    cmd.extend(["-frames:v", "1", "-q:v", str(qv), str(frame_path)])
-    return cmd
-
-
-def emit_frame_extraction_callback(job_id: str, status: str, stage: str, progress_percent: int, **extra: Any) -> None:
-    payload = {
-        "kind": "frame_extraction",
-        "jobId": job_id,
-        "status": status,
-        "stage": stage,
-        "progress_percent": int(max(0, min(100, progress_percent))),
-        "updated_at": int(time.time()),
-    }
-    payload.update(extra)
-    log_event("frame_extraction_progress", **payload)
-    post_render_callback(payload)
-
-
-def process_frame_extraction_job(data: dict[str, Any], receipt_handle: Optional[str] = None) -> dict[str, Any]:
-    job_id = str(data.get("jobId") or data.get("job_id") or data.get("id") or uuid.uuid4())
-    source = data.get("source") if isinstance(data.get("source"), dict) else {}
-    output = data.get("output") if isinstance(data.get("output"), dict) else {}
-    bucket = str(output.get("bucket") or data.get("outputBucket") or data.get("output_bucket") or OUTPUT_BUCKET).strip()
-    if not bucket:
-        raise ValueError("Frame extraction output bucket missing. Set OUTPUT_BUCKET or provide output.bucket")
-    prefix = str(output.get("s3_prefix") or output.get("s3Prefix") or f"{OUTPUT_PREFIX}/{job_id}/frames/").strip().lstrip("/")
-    if prefix and not prefix.endswith("/"):
-        prefix += "/"
-    timestamps = frame_timestamps(data)
-    frames_total = clamp_int(output.get("frames_total") or output.get("framesTotal"), len(timestamps), 1, 5000)
-    if len(timestamps) != frames_total:
-        timestamps = timestamps[:frames_total]
-        while len(timestamps) < frames_total:
-            timestamps.append(timestamps[-1] if timestamps else 0.0)
-
-    if receipt_handle:
-        change_message_visibility(receipt_handle, min(43200, max(VISIBILITY_TIMEOUT, 1800 + len(timestamps) * 20)), job_id)
-
-    emit_frame_extraction_callback(job_id, "processing", "starting", 1, total_frames=frames_total)
-    with tempfile.TemporaryDirectory(prefix=f"frames-{job_id[:8]}-", dir=str(RENDER_WORK_DIR)) as tmp:
-        work_dir = Path(tmp)
-        source_path = work_dir / frame_source_display_name(source)
-        download_frame_source(source, source_path)
-        if not source_path.exists() or source_path.stat().st_size <= 0:
-            raise RuntimeError("Downloaded frame extraction source is missing or empty")
-        frames_dir = work_dir / "frames"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        base = Path(frame_source_display_name(source)).stem or "frame"
-        pattern = str(output.get("filename_pattern") or output.get("filenamePattern") or "{base}_{index:04d}.jpg")
-        output_files: list[dict[str, Any]] = []
-        for idx, timestamp in enumerate(timestamps, start=1):
-            filename = frame_output_name(pattern, base, idx, timestamp)
-            frame_path = frames_dir / filename
-            cmd = build_frame_extract_command(source_path, frame_path, timestamp, data)
-            started = time.time()
-            result = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
-            if result.returncode != 0:
-                raise RuntimeError(f"Frame extraction failed at frame {idx}/{frames_total} timestamp={timestamp:.3f}; returncode={result.returncode}; stderr_tail={(result.stderr or '')[-3000:]}")
-            if not frame_path.exists() or frame_path.stat().st_size <= 0:
-                raise RuntimeError(f"Extracted frame missing/empty: {frame_path}")
-            key = f"{prefix}{filename}"
-            s3_uri = upload_jpeg_to_s3(frame_path, bucket, key)
-            item = {
-                "index": idx,
-                "timestamp_seconds": round(timestamp, 3),
-                "bucket": bucket,
-                "key": key,
-                "s3Uri": s3_uri,
-                "filename": filename,
-                "size_bytes": frame_path.stat().st_size,
-            }
-            output_files.append(item)
-            progress = int(5 + (idx / max(1, frames_total)) * 90)
-            emit_frame_extraction_callback(job_id, "processing", "extracting", progress, frame=item, frame_index=idx, total_frames=frames_total, elapsed_seconds=round(time.time() - started, 2))
-        result_payload = {"kind": "frame_extraction", "jobId": job_id, "status": "completed", "output_files": output_files, "frames_total": frames_total}
-        emit_frame_extraction_callback(job_id, "completed", "complete", 100, output_files=output_files, frames_total=frames_total)
-        log_event("frame_extraction_completed", job_id=job_id, frames_total=frames_total, output_count=len(output_files))
-        return result_payload
-
-
 def upload_file_to_s3(local_path: Path, bucket: str, key: str) -> str:
     s3.upload_file(str(local_path), bucket, key, ExtraArgs={"ContentType": "video/mp4"})
     return f"s3://{bucket}/{key}"
@@ -1465,13 +1025,14 @@ def parse_output_size(settings: dict[str, Any]) -> tuple[int, int]:
             width = int(width_text.strip())
             height = int(height_text.strip())
             if width > 0 and height > 0:
-                return apply_watermark_output_caps(settings, width, height)
+                return width, height
         except Exception:
             pass
 
-    width = safe_int(settings.get("output_width") or settings.get("width"), 1920)
-    height = safe_int(settings.get("output_height") or settings.get("height"), 1080)
-    return apply_watermark_output_caps(settings, width, height)
+    return (
+        safe_int(settings.get("output_width") or settings.get("width"), 1920),
+        safe_int(settings.get("output_height") or settings.get("height"), 1080),
+    )
 
 
 def normalize_motion_effect(settings: dict[str, Any]) -> str:
@@ -2137,264 +1698,6 @@ def apply_color_style_to_label(filters: list[str], label: str, settings: dict[st
     return out
 
 
-def ffmpeg_option_escape(value: Any) -> str:
-    text = str(value or "")
-    text = text.replace("\\", "\\\\")
-    text = text.replace("'", "\\'")
-    text = text.replace(":", "\\:")
-    text = text.replace(",", "\\,")
-    text = text.replace("%", "\\%")
-    return text
-
-
-def ffmpeg_color(value: Any, default: str = "0xFFFFFF") -> str:
-    text = str(value or "").strip()
-    if re.match(r"^#[0-9a-fA-F]{6}$", text):
-        return "0x" + text[1:]
-    if re.match(r"^0x[0-9a-fA-F]{6}$", text):
-        return text
-    if re.match(r"^[a-zA-Z]+$", text):
-        return text
-    return default
-
-
-def drawtext_filter(options: list[str]) -> str:
-    if not options or options[0] != "drawtext":
-        return ":".join(options)
-    return "drawtext=" + ":".join(options[1:])
-
-
-def normalize_drawtext_font(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    first = raw.split(",", 1)[0].strip().strip("'\"")
-    lowered = first.lower()
-    if lowered in {"system-ui", "sans-serif", "serif", "monospace", "inherit", "initial", "unset"}:
-        return ""
-    if not re.match(r"^[A-Za-z0-9 _.-]{1,64}$", first):
-        return ""
-    return first
-
-
-def watermark_position_expr(position: str, margin_px: int, *, text: bool = False, x_offset_px: int = 0) -> tuple[str, str]:
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(position or "bottom_right").strip().lower()).strip("_")
-    if normalized in {"top", "top_center"}:
-        normalized = "top_center"
-    elif normalized in {"bottom", "bottom_center"}:
-        normalized = "bottom_center"
-    elif normalized == "tile":
-        normalized = "tiled"
-    elif normalized not in {"top_left", "top_right", "bottom_left", "bottom_right", "center", "top_center", "bottom_center", "tiled"}:
-        normalized = "bottom_right"
-
-    w_var = "text_w" if text else "w"
-    h_var = "text_h" if text else "h"
-    main_w = "w" if text else "W"
-    main_h = "h" if text else "H"
-    margin = max(0, int(margin_px))
-    offset = max(0, int(x_offset_px))
-
-    if normalized == "tiled":
-        return f"{margin + offset}", f"{margin}"
-    if normalized == "top_left":
-        return f"{margin + offset}", f"{margin}"
-    if normalized == "top_right":
-        return f"{main_w}-{w_var}-{margin + offset}", f"{margin}"
-    if normalized == "bottom_left":
-        return f"{margin + offset}", f"{main_h}-{h_var}-{margin}"
-    if normalized == "bottom_right":
-        return f"{main_w}-{w_var}-{margin + offset}", f"{main_h}-{h_var}-{margin}"
-    if normalized == "top_center":
-        return f"({main_w}-{w_var})/2", f"{margin}"
-    if normalized == "bottom_center":
-        return f"({main_w}-{w_var})/2", f"{main_h}-{h_var}-{margin}"
-    return f"({main_w}-{w_var})/2", f"({main_h}-{h_var})/2"
-
-
-def watermark_logo_url(spec: Optional[dict[str, Any]]) -> str:
-    if not spec:
-        return ""
-    style = spec.get("style") if isinstance(spec.get("style"), dict) else {}
-    mode = str(style.get("mode") or "").strip().lower()
-    if mode not in {"logo", "combo"}:
-        return ""
-    logo = style.get("logo") if isinstance(style.get("logo"), dict) else {}
-    return str(logo.get("url") or "").strip()
-
-
-def add_watermark_logo_input(cmd: list[str], spec: Optional[dict[str, Any]], work_dir: Path, input_index: int) -> Optional[int]:
-    url = watermark_logo_url(spec)
-    if not url:
-        return None
-    parsed = urlparse(url)
-    suffix = Path(parsed.path).suffix or ".png"
-    if len(suffix) > 8 or not re.match(r"^\.[A-Za-z0-9]+$", suffix):
-        suffix = ".png"
-    logo_path = work_dir / f"watermark_logo{suffix.lower()}"
-    download_one_image(url, logo_path)
-    if not logo_path.exists() or logo_path.stat().st_size <= 0:
-        raise RuntimeError("Watermark logo download produced an empty file")
-    cmd.extend(["-i", str(logo_path)])
-    return input_index
-
-
-def apply_watermark_to_label(
-    filters: list[str],
-    label: str,
-    spec: Optional[dict[str, Any]],
-    output_width: int,
-    output_height: int,
-    logo_input_index: Optional[int],
-    fps: int,
-) -> str:
-    if not spec:
-        return label
-
-    style = spec.get("style") if isinstance(spec.get("style"), dict) else {}
-    mode = str(style.get("mode") or "text").strip().lower()
-    text_style = style.get("text") if isinstance(style.get("text"), dict) else {}
-    logo_style = style.get("logo") if isinstance(style.get("logo"), dict) else {}
-    placement = style.get("placement") if isinstance(style.get("placement"), dict) else {}
-
-    position = str(placement.get("position") or "bottom_right")
-    margin_pct = clamp_number(placement.get("margin_pct") or placement.get("marginPct"), 3.0, 0.0, 25.0)
-    margin_px = int(round(min(output_width, output_height) * margin_pct / 100.0))
-    rotation_deg = clamp_number(placement.get("rotation_deg") or placement.get("rotationDeg"), 0.0, -180.0, 180.0)
-    blend_mode = str(placement.get("blend_mode") or placement.get("blendMode") or "normal").strip().lower()
-    if blend_mode and blend_mode != "normal":
-        log_event("watermark_blend_mode_ignored", requested=blend_mode, supported="normal")
-
-    current = label
-    logo_width = 0
-    if mode in {"logo", "combo"} and logo_input_index is not None:
-        logo_size_pct = clamp_number(logo_style.get("size_pct") or logo_style.get("sizePct"), 12.0, 1.0, 80.0)
-        logo_opacity = clamp_number(logo_style.get("opacity"), 0.75, 0.0, 1.0)
-        logo_width = max(1, int(round(output_width * logo_size_pct / 100.0)))
-        logo_filters = [f"scale={logo_width}:-1:force_original_aspect_ratio=decrease:flags=lanczos", "format=rgba"]
-        if logo_opacity < 1.0:
-            logo_filters.append(f"colorchannelmixer=aa={logo_opacity:.4f}")
-        if abs(rotation_deg) > 0.01:
-            logo_filters.append(f"rotate={rotation_deg:.4f}*PI/180:c=none:ow=rotw(iw):oh=roth(ih)")
-        logo_label = f"wmlogo{len(filters)}"
-        filters.append(f"[{logo_input_index}:v]{','.join(logo_filters)}[{logo_label}]")
-        x, y = watermark_position_expr(position, margin_px, text=False)
-        out = f"wmov{len(filters)}"
-        filters.append(f"[{current}][{logo_label}]overlay=x={x}:y={y}:format=auto,fps={fps},format=yuv420p[{out}]")
-        current = out
-
-    text_value = str(text_style.get("value") or "").strip()
-    if mode in {"text", "combo"} and text_value:
-        text_opacity = clamp_number(text_style.get("opacity"), 0.65, 0.0, 1.0)
-        size_pct = clamp_number(text_style.get("size_pct") or text_style.get("sizePct"), 3.0, 0.5, 20.0)
-        font_size = max(8, int(round(output_height * size_pct / 100.0)))
-        font_family = ""
-        color = ffmpeg_color(text_style.get("color"), "0xFFFFFF")
-        text_x_offset = logo_width + max(4, margin_px // 2) if mode == "combo" and logo_width > 0 else 0
-        x, y = watermark_position_expr(position, margin_px, text=True, x_offset_px=text_x_offset)
-        drawtext = [
-            "drawtext",
-            f"text='{ffmpeg_option_escape(text_value)}'",
-            *([f"font='{ffmpeg_option_escape(font_family)}'"] if font_family else []),
-            f"fontsize={font_size}",
-            f"fontcolor={color}@{text_opacity:.4f}",
-            f"x={x}",
-            f"y={y}",
-        ]
-        shadow = text_style.get("shadow")
-        if truthy_setting(shadow) or isinstance(shadow, dict):
-            shadow_opacity = 0.55
-            shadow_color = "0x000000"
-            shadow_offset = max(1, int(round(font_size * 0.08)))
-            if isinstance(shadow, dict):
-                shadow_opacity = clamp_number(shadow.get("opacity"), shadow_opacity, 0.0, 1.0)
-                shadow_color = ffmpeg_color(shadow.get("color"), shadow_color)
-                shadow_offset = clamp_int(shadow.get("offset_px") or shadow.get("offsetPx"), shadow_offset, 0, 20)
-            drawtext.extend([
-                f"shadowcolor={shadow_color}@{shadow_opacity:.4f}",
-                f"shadowx={shadow_offset}",
-                f"shadowy={shadow_offset}",
-            ])
-        normalized_position = re.sub(r"[^a-z0-9]+", "_", str(position or "").strip().lower()).strip("_")
-        if normalized_position in {"tile", "tiled"}:
-            drawtext_base = [item for item in drawtext if not item.startswith("x=") and not item.startswith("y=")]
-            repeat = style.get("repeat") if isinstance(style.get("repeat"), dict) else {}
-            tile_spacing_pct = clamp_number(
-                repeat.get("spacing_pct")
-                or placement.get("tile_spacing_pct")
-                or placement.get("tileSpacingPct"),
-                12.0,
-                5.0,
-                60.0,
-            )
-            requested_columns = safe_int(
-                placement.get("tile_columns")
-                or placement.get("tileColumns")
-                or repeat.get("columns"),
-                0,
-            )
-            requested_rows = safe_int(
-                placement.get("tile_rows")
-                or placement.get("tileRows")
-                or repeat.get("rows"),
-                0,
-            )
-            columns = max(1, min(5, requested_columns)) if requested_columns > 0 else 0
-            rows = max(1, min(5, requested_rows)) if requested_rows > 0 else 0
-            if columns <= 0 or rows <= 0:
-                spacing = max(font_size * 7, int(round(min(output_width, output_height) * tile_spacing_pct / 100.0)))
-                columns = max(2, min(5, int(math.ceil(output_width / spacing)) + 1))
-                rows = max(2, min(4, int(math.ceil(output_height / spacing)) + 1))
-            stagger = truthy_setting(placement.get("tile_stagger") or placement.get("tileStagger") or repeat.get("stagger") or repeat.get("stagger_rows") or repeat.get("staggerRows"))
-            tile_filters: list[str] = []
-            usable_w = f"(w-text_w-{2 * margin_px})"
-            usable_h = f"(h-text_h-{2 * margin_px})"
-            for row in range(rows):
-                for col in range(columns):
-                    denominator_x = max(1, columns - 1)
-                    denominator_y = max(1, rows - 1)
-                    if columns == 1:
-                        x_expr = "(w-text_w)/2"
-                    else:
-                        stagger_expr = f"+({usable_w})/(2*{denominator_x})" if stagger and row % 2 and columns > 1 else ""
-                        x_expr = f"floor({margin_px}+({usable_w})*{col}/{denominator_x}{stagger_expr})"
-                    if rows == 1:
-                        y_expr = "(h-text_h)/2"
-                    else:
-                        y_expr = f"floor({margin_px}+({usable_h})*{row}/{denominator_y})"
-                    tile_filters.append(drawtext_filter([*drawtext_base, f"x={x_expr}", f"y={y_expr}"]))
-            if not tile_filters:
-                tile_filters.append(drawtext_filter([*drawtext_base, "x=(w-text_w)/2", "y=(h-text_h)/2"]))
-            out = f"wmtext{len(filters)}"
-            filters.append(f"[{current}]{','.join(tile_filters)},format=yuv420p[{out}]")
-            if abs(rotation_deg) > 0.01:
-                log_event("watermark_text_rotation_ignored", requested_degrees=rotation_deg, reason="tiled drawtext uses unrotated repeated positions")
-            log_event(
-                "watermark_tiled_repeated",
-                tile_count=len(tile_filters),
-                tile_spacing_pct=tile_spacing_pct,
-                rows=rows,
-                columns=columns,
-                stagger=stagger,
-            )
-        else:
-            out = f"wmtext{len(filters)}"
-            filters.append(f"[{current}]{drawtext_filter(drawtext)},format=yuv420p[{out}]")
-        current = out
-
-    log_event(
-        "watermark_enabled",
-        schema_version=spec.get("schema_version"),
-        mode=mode,
-        surfaces=spec.get("surfaces"),
-        has_logo=bool(logo_input_index is not None),
-        has_text=bool(text_value),
-        position=position,
-        margin_pct=margin_pct,
-    )
-    return current
-
-
 def preprocess_images(job_id: str, image_files: list[Path], processed_dir: Path, settings: dict[str, Any], reporter: ProgressReporter, cache_keys: Optional[list[str]] = None) -> list[Path]:
     processed_dir.mkdir(parents=True, exist_ok=True)
     preprocess_width, preprocess_height, preprocess_mode = preprocess_target_size(settings)
@@ -2436,8 +1739,8 @@ def preprocess_images(job_id: str, image_files: list[Path], processed_dir: Path,
             )
         else:
             vf = (
-                f"scale={preprocess_width}:{preprocess_height}:force_original_aspect_ratio=increase:flags=lanczos,"
-                f"crop={preprocess_width}:{preprocess_height},setsar=1"
+                f"scale={preprocess_width}:{preprocess_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                f"pad={preprocess_width}:{preprocess_height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
             )
         cmd = [get_ffmpeg_bin(), "-hide_banner", "-y", "-i", str(src), "-vf", vf, "-frames:v", "1", "-q:v", "2", str(dest)]
         try:
@@ -2486,10 +1789,6 @@ def build_ffmpeg_command(image_files: list[Path], output_path: Path, settings: d
         stage_settings.get("transition_duration") or stage_settings.get("transitionDuration"),
         0.75 if transition_style != "none" else 0.0,
     )
-    # Watermarking is intentionally a post-assembly pass. Keep caps in
-    # parse_output_size(), but do not burn watermarks into per-image assembly
-    # graphs because those paths interact with cached processed frames.
-    watermark_spec = None
 
     if motion_sequence:
         cmd = [get_ffmpeg_bin(), "-hide_banner", "-y"]
@@ -2510,7 +1809,6 @@ def build_ffmpeg_command(image_files: list[Path], output_path: Path, settings: d
 
         for img, image_seconds in zip(image_files, image_durations):
             cmd.extend(["-loop", "1", "-t", f"{image_seconds:.3f}", "-i", str(img)])
-        watermark_logo_input = add_watermark_logo_input(cmd, watermark_spec, output_path.parent, len(image_files))
 
         filters: list[str] = []
         motion_labels: list[str] = []
@@ -2568,7 +1866,6 @@ def build_ffmpeg_command(image_files: list[Path], output_path: Path, settings: d
 
         final_label = combine_video_labels(filters, motion_labels, image_durations, transition_style, transition_duration, fps)
         final_label = apply_color_style_to_label(filters, final_label, stage_settings)
-        final_label = apply_watermark_to_label(filters, final_label, watermark_spec, output_width, output_height, watermark_logo_input, fps)
 
         cmd.extend([
             "-filter_complex", ";".join(filters),
@@ -2586,7 +1883,6 @@ def build_ffmpeg_command(image_files: list[Path], output_path: Path, settings: d
         cmd = [get_ffmpeg_bin(), "-hide_banner", "-y"]
         for img in image_files:
             cmd.extend(["-loop", "1", "-t", f"{seconds_per_image:.3f}", "-i", str(img)])
-        watermark_logo_input = add_watermark_logo_input(cmd, watermark_spec, output_path.parent, len(image_files))
 
         filters: list[str] = []
         labels: list[str] = []
@@ -2594,16 +1890,15 @@ def build_ffmpeg_command(image_files: list[Path], output_path: Path, settings: d
             label = f"s{idx}"
             filters.append(
                 f"[{idx}:v]"
-                f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
-                f"crop={output_width}:{output_height},setsar=1,fps={fps},"
+                f"scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+                f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},"
                 f"trim=duration={seconds_per_image:.3f},setpts=PTS-STARTPTS,format=yuv420p"
                 f"[{label}]"
             )
             labels.append(label)
 
         final_label = combine_video_labels(filters, labels, seconds_per_image, transition_style, transition_duration, fps)
-        final_label = apply_color_style_to_label(filters, final_label, stage_settings)
-        final_label = apply_watermark_to_label(filters, final_label, watermark_spec, output_width, output_height, watermark_logo_input, fps)
+        final_label = apply_color_style_to_label(filters, final_label, settings)
         cmd.extend([
             "-filter_complex", ";".join(filters),
             "-map", f"[{final_label}]",
@@ -2625,31 +1920,16 @@ def build_ffmpeg_command(image_files: list[Path], output_path: Path, settings: d
         escaped_last = str(image_files[-1]).replace("'", "'\\''")
         f.write(f"file '{escaped_last}'\n")
 
-    static_filters = [f"fps={fps}", *color_style_filters(stage_settings), "format=yuv420p"]
+    static_filters = [f"fps={fps}", *color_style_filters(settings), "format=yuv420p"]
     cmd = [
         get_ffmpeg_bin(), "-hide_banner", "-y",
         "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-vf", ",".join(static_filters),
+        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+        "-pix_fmt", "yuv420p", "-r", str(fps), "-movflags", "+faststart",
+        "-progress", "pipe:1", "-nostats",
+        str(output_path),
     ]
-    watermark_logo_input = add_watermark_logo_input(cmd, watermark_spec, output_path.parent, 1)
-    if watermark_spec:
-        filters = [f"[0:v]{','.join(static_filters)}[static0]"]
-        final_label = apply_watermark_to_label(filters, "static0", watermark_spec, output_width, output_height, watermark_logo_input, fps)
-        cmd.extend([
-            "-filter_complex", ";".join(filters),
-            "-map", f"[{final_label}]",
-            "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
-            "-pix_fmt", "yuv420p", "-r", str(fps), "-movflags", "+faststart",
-            "-progress", "pipe:1", "-nostats",
-            str(output_path),
-        ])
-    else:
-        cmd.extend([
-            "-vf", ",".join(static_filters),
-            "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
-            "-pix_fmt", "yuv420p", "-r", str(fps), "-movflags", "+faststart",
-            "-progress", "pipe:1", "-nostats",
-            str(output_path),
-        ])
     return cmd, seconds_per_image
 
 
@@ -2775,56 +2055,6 @@ def is_xfade_filter_error(exc: Exception) -> bool:
     )
 
 
-def build_watermark_post_assembly_command(input_path: Path, output_path: Path, settings: dict[str, Any]) -> Optional[list[str]]:
-    spec = normalize_watermark_spec(settings)
-    if not spec:
-        return None
-    apply_stage = spec.get("apply_stage") if isinstance(spec.get("apply_stage"), dict) else {}
-    video_stage = str(apply_stage.get("video") or "post_assembly").strip().lower()
-    if video_stage and video_stage != "post_assembly":
-        log_event("watermark_video_apply_stage_ignored", requested=video_stage, required="post_assembly")
-
-    fps = safe_int(settings.get("fps") or settings.get("output_fps"), 30)
-    crf = safe_int(settings.get("crf"), 20)
-    preset = str(settings.get("preset") or os.getenv("FFMPEG_PRESET", "veryfast"))
-    output_width, output_height = parse_output_size(settings)
-
-    cmd = [get_ffmpeg_bin(), "-hide_banner", "-y", "-i", str(input_path)]
-    logo_input = add_watermark_logo_input(cmd, spec, output_path.parent, 1)
-    filters = [f"[0:v]fps={fps},format=yuv420p[wmbase]"]
-    final_label = apply_watermark_to_label(filters, "wmbase", spec, output_width, output_height, logo_input, fps)
-    cmd.extend([
-        "-filter_complex", ";".join(filters),
-        "-map", f"[{final_label}]",
-        "-map", "0:a?",
-        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
-        "-pix_fmt", "yuv420p", "-r", str(fps),
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        str(output_path),
-    ])
-    return cmd
-
-
-def run_postprocess_command(cmd: list[str], job_id: str, timeout_seconds: int, stage: str) -> None:
-    started_at = time.time()
-    log_event(f"{stage}_start", job_id=job_id, command_preview=" ".join(cmd[:80]) + (" ..." if len(cmd) > 80 else ""))
-    try:
-        result = subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=max(300, min(timeout_seconds, 3600)),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"{stage} timed out after {round(time.time() - started_at, 2)}s") from exc
-    log_event(f"{stage}_finished", job_id=job_id, returncode=result.returncode, elapsed_seconds=round(time.time() - started_at, 2))
-    if result.returncode != 0:
-        raise RuntimeError(f"{stage} failed with return code {result.returncode}; stderr_tail={(result.stderr or '')[-4000:]}")
-
-
 def run_audio_mux_command(cmd: list[str], job_id: str, timeout_seconds: int) -> None:
     started_at = time.time()
     log_event("audio_mux_start", job_id=job_id, command_preview=" ".join(cmd[:80]) + (" ..." if len(cmd) > 80 else ""))
@@ -2849,36 +2079,16 @@ def download_images(job: RenderJob, work_dir: Path, reporter: ProgressReporter) 
     images_dir.mkdir(parents=True, exist_ok=True)
     image_files: list[Path] = []
     cache_keys: list[str] = []
-    force_media_download = job_flag(job, "force_media_download", "forceMediaDownload")
-    skip_media_download_if_cached = job_flag(job, "skip_media_download_if_cached", "skipMediaDownloadIfCached")
-    image_cache_fingerprint, image_cache_changed_at, image_cache_manifest = job_cache_metadata(job)
-
-    log_event(
-        "media_cache_policy",
-        job_id=job.job_id,
-        image_cache_enabled=IMAGE_CACHE_ENABLED,
-        skip_media_download_if_cached=skip_media_download_if_cached,
-        force_media_download=force_media_download,
-        has_image_cache_fingerprint=bool(image_cache_fingerprint),
-        has_image_cache_manifest=bool(image_cache_manifest),
-    )
 
     for idx, image_ref in enumerate(job.images, start=1):
         display_name = image_ref_display_name(image_ref, idx)
         suffix = Path(display_name).suffix or ".jpg"
         dest = images_dir / f"{idx - 1:05d}{suffix}"
-        manifest_entry = manifest_entry_for_image(image_cache_manifest, idx, image_ref)
-        cache_key = image_cache_key(image_ref, manifest_entry)
+        cache_key = image_cache_key(image_ref)
         cache_keys.append(cache_key)
 
         cached_file, cached_meta = cache_paths_for_image(cache_key, suffix)
-        if not force_media_download and valid_cached_image(
-            image_ref,
-            cached_file,
-            cached_meta,
-            cache_key=cache_key,
-            image_cache_fingerprint=image_cache_fingerprint,
-        ):
+        if valid_cached_image(image_ref, cached_file, cached_meta):
             reporter.image(
                 image_index=idx,
                 filename=dest.name,
@@ -2890,57 +2100,9 @@ def download_images(job: RenderJob, work_dir: Path, reporter: ProgressReporter) 
             )
             shutil.copy2(cached_file, dest)
             touch_cache_metadata(cached_meta)
-            log_event(
-                "image_cache_hit",
-                job_id=job.job_id,
-                image_index=idx,
-                cache_key=cache_key,
-                cached_file=str(cached_file),
-                skip_media_download_if_cached=skip_media_download_if_cached,
-                image_cache_fingerprint=image_cache_fingerprint,
-            )
+            log_event("image_cache_hit", job_id=job.job_id, image_index=idx, cache_key=cache_key, cached_file=str(cached_file))
             image_files.append(dest)
             continue
-
-        legacy_cache_key = stable_json_hash(image_cache_identity(image_ref))
-        if not force_media_download and legacy_cache_key != cache_key:
-            legacy_cached_file, legacy_cached_meta = cache_paths_for_image(legacy_cache_key, suffix)
-            if valid_cached_image(image_ref, legacy_cached_file, legacy_cached_meta, image_cache_fingerprint=image_cache_fingerprint):
-                reporter.image(
-                    image_index=idx,
-                    filename=dest.name,
-                    stage="cached",
-                    image_status="complete",
-                    image_percent=100,
-                    message=f"Using cached image {idx}/{len(job.images)}",
-                    force=True,
-                )
-                shutil.copy2(legacy_cached_file, dest)
-                touch_cache_metadata(legacy_cached_meta)
-                try:
-                    cached_file.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(legacy_cached_file, cached_file)
-                    write_cache_metadata(
-                        cached_meta,
-                        image_cache_identity(image_ref),
-                        cached_file,
-                        cache_key=cache_key,
-                        image_cache_fingerprint=image_cache_fingerprint,
-                        image_cache_changed_at=image_cache_changed_at,
-                    )
-                except Exception as exc:
-                    log_event("image_cache_migration_failed", job_id=job.job_id, image_index=idx, cache_key=cache_key, legacy_cache_key=legacy_cache_key, error=str(exc))
-                log_event(
-                    "image_cache_legacy_hit",
-                    job_id=job.job_id,
-                    image_index=idx,
-                    cache_key=cache_key,
-                    legacy_cache_key=legacy_cache_key,
-                    cached_file=str(legacy_cached_file),
-                    image_cache_fingerprint=image_cache_fingerprint,
-                )
-                image_files.append(dest)
-                continue
 
         reporter.image(image_index=idx, filename=dest.name, stage="downloading", image_status="processing", image_percent=5, message=f"Downloading image {idx}/{len(job.images)}", force=True)
         try:
@@ -2956,23 +2118,8 @@ def download_images(job: RenderJob, work_dir: Path, reporter: ProgressReporter) 
             try:
                 cached_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(dest, cached_file)
-                write_cache_metadata(
-                    cached_meta,
-                    image_cache_identity(image_ref),
-                    cached_file,
-                    cache_key=cache_key,
-                    image_cache_fingerprint=image_cache_fingerprint,
-                    image_cache_changed_at=image_cache_changed_at,
-                )
-                log_event(
-                    "image_cache_saved",
-                    job_id=job.job_id,
-                    image_index=idx,
-                    cache_key=cache_key,
-                    cached_file=str(cached_file),
-                    image_cache_fingerprint=image_cache_fingerprint,
-                    force_media_download=force_media_download,
-                )
+                write_cache_metadata(cached_meta, image_cache_identity(image_ref), cached_file)
+                log_event("image_cache_saved", job_id=job.job_id, image_index=idx, cache_key=cache_key, cached_file=str(cached_file))
             except Exception as exc:
                 log_event("image_cache_save_failed", job_id=job.job_id, image_index=idx, error=str(exc))
 
@@ -3019,44 +2166,18 @@ def render_job(job: RenderJob, receipt_handle: Optional[str] = None) -> dict[str
             fallback_settings["transitionStyle"] = "none"
             cmd, image_stage_seconds = build_ffmpeg_command(processed_files, video_only_path, fallback_settings, job.per_image_settings)
             run_ffmpeg_with_progress(cmd, job.job_id, timeout_seconds, len(processed_files), image_stage_seconds, reporter, processed_files)
-        video_duration = max(0.1, image_stage_seconds * max(1, len(processed_files)))
         if audio_tracks:
             if not video_only_path.exists() or video_only_path.stat().st_size == 0:
                 raise RuntimeError("Video-only output file missing or empty before audio mux")
             reporter.emit(stage="ffmpeg_encoding", status="processing", progress_percent=95, message="Mixing audio track", force=True)
+            video_duration = max(0.1, image_stage_seconds * max(1, len(processed_files)))
             audio_cmd = build_audio_mux_command(video_only_path, output_path, audio_tracks, audio_files, render_settings, video_duration)
             run_audio_mux_command(audio_cmd, job.job_id, timeout_seconds)
-
-        watermark_cmd = build_watermark_post_assembly_command(output_path, work_dir / "render_watermarked.mp4", render_settings)
-        if watermark_cmd:
-            if not output_path.exists() or output_path.stat().st_size == 0:
-                raise RuntimeError("Assembled output file missing or empty before watermark pass")
-            reporter.emit(stage="watermarking", status="processing", progress_percent=92, message="Burning watermark", force=True)
-            watermarked_path = work_dir / "render_watermarked.mp4"
-            run_postprocess_command(watermark_cmd, job.job_id, timeout_seconds, "watermark_post_assembly")
-            reporter.emit(stage="watermarking", status="processing", progress_percent=95, message="Watermark complete", force=True)
-            output_path = watermarked_path
-
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise RuntimeError("Rendered output file missing or empty")
         reporter.emit(stage="uploading", status="processing", progress_percent=96, message="Uploading rendered video", force=True)
         s3_uri = upload_file_to_s3(output_path, job.output_bucket, job.output_key)
-        output_width, output_height = parse_output_size(render_settings)
-        output_fps = safe_int(render_settings.get("fps") or render_settings.get("output_fps"), 30)
-        result = {
-            "jobId": job.job_id,
-            "status": "completed",
-            "bucket": job.output_bucket,
-            "key": job.output_key,
-            "s3Uri": s3_uri,
-            "output_url": s3_uri,
-            "output_video_path": s3_uri,
-            "output_filename": Path(job.output_key).name,
-            "output_resolution": f"{output_width}x{output_height}",
-            "output_fps": output_fps,
-            "output_duration_seconds": round(video_duration, 3),
-            "size_bytes": output_path.stat().st_size,
-        }
+        result = {"jobId": job.job_id, "status": "completed", "bucket": job.output_bucket, "key": job.output_key, "s3Uri": s3_uri, "output_url": s3_uri, "size_bytes": output_path.stat().st_size}
         reporter.emit(stage="complete", status="completed", progress_percent=100, message="Render completed", extra=result, force=True)
         log_event("job_completed", **result)
         return result
@@ -3067,13 +2188,6 @@ def process_sqs_message(message: dict[str, Any]) -> None:
     message_id = message.get("MessageId", "")
     try:
         payload = parse_message_body(message.get("Body", ""))
-        if frame_extraction_kind(payload) == "frame_extraction":
-            job_id = str(payload.get("jobId") or payload.get("job_id") or payload.get("id") or message_id)
-            log_event("frame_extraction_message_received", message_id=message_id, job_id=job_id)
-            process_frame_extraction_job(payload, receipt_handle=receipt_handle)
-            sqs.delete_message(QueueUrl=SQS_QUEUE_URL, ReceiptHandle=receipt_handle)
-            log_event("message_deleted", job_id=job_id, message_id=message_id)
-            return
         job = extract_job(payload)
         log_event("message_received", message_id=message_id, job_id=job.job_id)
         render_job(job, receipt_handle=receipt_handle)
@@ -3085,10 +2199,7 @@ def process_sqs_message(message: dict[str, Any]) -> None:
         try:
             payload = parse_message_body(message.get("Body", ""))
             job_id = str(payload.get("jobId") or payload.get("job_id") or payload.get("id") or message_id)
-            if frame_extraction_kind(payload) == "frame_extraction":
-                emit_frame_extraction_callback(job_id, "failed", "failed", 0, error=err, message="Frame extraction failed")
-            else:
-                ProgressReporter(job_id=job_id, total_images=1).emit(stage="failed", status="failed", progress_percent=0, message="Render failed", error=err, force=True)
+            ProgressReporter(job_id=job_id, total_images=1).emit(stage="failed", status="failed", progress_percent=0, message="Render failed", error=err, force=True)
         except Exception:
             pass
         try:

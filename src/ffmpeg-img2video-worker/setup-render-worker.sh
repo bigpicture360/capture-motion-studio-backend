@@ -43,6 +43,7 @@ if [ ! -f "$ENV_FILE" ]; then
 # Prefer EC2 Instance Profile / IAM Role. Do not store static AWS keys here.
 AWS_DEFAULT_REGION=us-east-1
 SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789012/your-queue-name
+VIDEO_BRANDING_SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789012/your-video-branding-queue-name
 S3_BUCKET=your-s3-bucket-name
 
 # === Supabase / Lovable Cloud ===
@@ -53,7 +54,9 @@ RENDER_WORKER_SECRET=replace-me
 # === Worker Settings ===
 POLL_INTERVAL=5
 MAX_CONCURRENT=2
+VIDEO_BRANDING_MAX_CONCURRENT=1
 VISIBILITY_TIMEOUT=3600
+VIDEO_BRANDING_VISIBILITY_TIMEOUT=3600
 MIN_FREE_DISK_GB=2
 LOG_LEVEL=INFO
 ENVEOF
@@ -63,7 +66,7 @@ else
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-for f in render_worker.py Dockerfile.render-worker docker-compose.render-worker.yml requirements.txt; do
+for f in render_worker.py video_branding_worker.py Dockerfile.render-worker docker-compose.render-worker.yml requirements.txt; do
   if [ -f "$SCRIPT_DIR/$f" ]; then
     cp "$SCRIPT_DIR/$f" "$WORKER_DIR/"
     echo "  → Copied $f"
